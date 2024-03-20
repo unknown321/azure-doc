@@ -1,0 +1,37 @@
+body {
+	font-family: Segoe UI, SegoeUI, Helvetica Neue, Helvetica, Arial, sans-serif;
+}
+
+table {
+	border-collapse: collapse;
+	border-spacing: 0px 0px;
+	box-sizing: border-box;
+	color: rgb(22, 22, 22);
+	color-scheme: light;
+	font-family: Segoe UI, SegoeUI, Helvetica Neue, Helvetica, Arial, sans-serif;
+	font-size: 14px;
+	font-weight: 400;
+	line-height: 25.6px;
+	margin-block-start: 0px;
+	margin-top: 0px;
+	outline-color: rgb(22, 22, 22);
+	table-layout: auto;
+	text-rendering: optimizelegibility;
+}
+
+table tr td {
+    border: 1px solid;
+}
+
+img {
+	max-width: 100%; height: auto;
+}
+
+code {
+	font-family: SFMono-Regular, Consolas, Liberation Mono, Menlo, Courier, monospace;
+	background-color: rgb(242, 242, 242);
+}
+
+pre > code {
+	display:block;
+}
