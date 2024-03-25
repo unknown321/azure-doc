@@ -1,6 +1,8 @@
 package main
 
 import (
+	"azure-doc/fixForMD"
+	"bufio"
 	"bytes"
 	"embed"
 	"flag"
@@ -369,16 +371,87 @@ func (t *Toc) ToEPUB(e *epub.Epub, basePath string, renderer markdown.Renderer, 
 	}
 }
 
+func ItemToMD(buf *bufio.Writer, item TocItem, basePath string) {
+	var err error
+
+	// href is too small for "*.yml/md" or just empty
+	if len(item.Href) < 5 {
+		_, err = buf.Write([]byte("# " + item.Name + "\n"))
+
+		if err != nil {
+			panic(err)
+		}
+
+		if len(item.Items) > 0 {
+			for _, i := range item.Items {
+				ItemToMD(buf, i, basePath)
+			}
+		}
+
+		return
+	}
+
+	f, contentPath, err := GetContents(path.Join(basePath, item.Href))
+	if err != nil {
+		slog.Error("cannot read contents of toc item", "error", err.Error())
+		return
+	}
+
+	f = ImageFromTripleColon(f)
+	f = RemoveYMLHeader(f)
+	f = AddPageTitle(f, item.Name)
+
+	f = fixForMD.FixPathsMD(f, contentPath, basePath)
+
+	_, err = buf.Write(f)
+	if err != nil {
+		panic(err)
+	}
+
+	if err = buf.Flush(); err != nil {
+		panic(err)
+	}
+
+	if len(item.Items) > 0 {
+		for _, i := range item.Items {
+			ItemToMD(buf, i, basePath)
+		}
+	}
+
+	return
+}
+
+func (t *Toc) ToMD(f *os.File, basePath string, title string) error {
+	b := bufio.NewWriter(f)
+	_, err := b.Write([]byte("# " + title + "\n"))
+	if err != nil {
+		return err
+	}
+
+	for _, i := range t.Items {
+		ItemToMD(b, i, basePath)
+	}
+
+	if err = b.Flush(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
 // this code is poorly structured; I am not proud of it
 // still works
 
 func main() {
 	var basePath string
 	var output string
+	var outputMD string
 	title := "Azure Architecture Center"
 	outDefault := strings.Replace(title, " ", "_", -1) + ".epub"
+	outDefaultMarkdown := strings.Replace(title, " ", "_", -1) + ".md"
 	flag.StringVar(&basePath, "path", "./architecture-center/docs", "path to `docs` dir")
 	flag.StringVar(&output, "out", outDefault, "output file")
+	flag.StringVar(&outputMD, "outMD", outDefaultMarkdown, "output markdown file")
 	flag.Parse()
 
 	htmlFlags := html.CommonFlags | html.HrefTargetBlank
@@ -417,4 +490,17 @@ func main() {
 	if err != nil {
 		log.Fatalf("cannot write epub: %s\n", err.Error())
 	}
+
+	f, err := os.Create(outputMD)
+	if err != nil {
+		log.Fatalf("cannot open md for writing: %s\n", err.Error())
+	}
+
+	err = toc.ToMD(f, basePath, title)
+	if err != nil {
+		log.Fatalf("cannot write md: %s\n", err.Error())
+	}
+
+	f.Close()
+
 }
