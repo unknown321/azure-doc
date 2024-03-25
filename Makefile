@@ -28,6 +28,13 @@ $(BINARY):
 build: $(BINARY)
 
 clean:
-	@-rm $(BINARY) *.epub
+	@-rm $(BINARY) *.epub $(BINARY)-linux-amd64
+
+test:
+	@go test -v .
+
+release: clean build Azure_Architecture_Center.epub
+	strip $(BINARY)
+	mv $(BINARY) $(BINARY)-linux-amd64
 
 .DEFAULT_GOAL=Azure_Architecture_Center.epub

@@ -13,6 +13,7 @@ import (
 	"gopkg.in/yaml.v2"
 	"io/fs"
 	"log"
+	"log/slog"
 	"os"
 	"path"
 	"path/filepath"
@@ -23,8 +24,10 @@ import (
 //go:embed epub.css
 var emb embed.FS
 
-var r = regexp.MustCompile("(?i)\\(.*.(png|svg|jpg)\\)")
-var imageInHTML = regexp.MustCompile(`(?i)src="(.*.(?:png|svg|jpg))"`)
+// var r = regexp.MustCompile(`(?i)[(].*[^)]\.(png|jpg|svg)\)`) // ![title](image.png)
+var r = regexp.MustCompile(`(?i)\([^)].*?\)`)
+var imageReference = regexp.MustCompile(`(?i)\]: (.*(jpg|png|svg))`)   // [test]: ./images/1.png
+var imageInHTML = regexp.MustCompile(`(?i)src="(.*.(?:png|svg|jpg))"`) // <a src="./images/1.png">
 var inc = regexp.MustCompile("(?i)\\[\\!include\\[\\]\\((.*.md)\\)]")
 var tripleColon = regexp.MustCompile("(?i):::image .* source=\"(.*?)\".*:::")
 var altText = regexp.MustCompile("(?i)alt-text=\"(.*?)\"")
@@ -51,9 +54,14 @@ func getPics(basePath string, e *epub.Epub) {
 		}
 
 		ext := info.Name()[len(info.Name())-3 : len(info.Name())]
+
 		switch ext {
 		case "png", "jpg":
-			newName := strings.ReplaceAll(p[len(basePath)+1:], "/", "_")
+			c := strings.TrimPrefix(p, path.Clean(basePath))
+			c = strings.TrimPrefix(c, "/")
+			newName := strings.ReplaceAll(c, "/", "_")
+			//fmt.Println("new image " + newName)
+
 			_, err = e.AddImage(p, strings.ToLower(newName))
 			if err != nil {
 				panic(err)
@@ -67,14 +75,16 @@ func getPics(basePath string, e *epub.Epub) {
 	}
 }
 
-func MDFromYML(ymlPath string) ([]byte, string, error) {
-	var f []byte
-	var err error
-	if f, err = os.ReadFile(ymlPath); err != nil {
+// MDFromYML extracts path to first included md file from yml
+// path to md is relative to yml
+func MDFromYML(ymlPath string) (md []byte, contentPath string, err error) {
+	var ymlData []byte
+	if ymlData, err = os.ReadFile(ymlPath); err != nil {
 		return nil, "", fmt.Errorf("cannot read md from yml: %w", err)
 	}
+
 	// only first occurrence
-	res := inc.FindStringSubmatch(string(f))
+	res := inc.FindStringSubmatch(string(ymlData))
 	if len(res) < 2 {
 		return nil, "", fmt.Errorf("failed to found included md with actual contents in yml %s", ymlPath)
 	}
@@ -82,17 +92,81 @@ func MDFromYML(ymlPath string) ([]byte, string, error) {
 	d := path.Dir(ymlPath)
 	mdPath := path.Join(d, res[1])
 
-	var md []byte
 	if md, err = os.ReadFile(mdPath); err != nil {
 		return nil, "", fmt.Errorf("cannot open md %s from yml %s: %w", ymlPath, mdPath, err)
 	}
 	return md, mdPath, nil
 }
 
-func FixImages(f []byte, fullPath string, basePath string) []byte {
+func FixMDImages(f []byte, fullPath string, basePath string) []byte {
 	d := path.Dir(fullPath)
-	images := r.FindAll(f, -1)
 
+	replaces := map[string]string{}
+
+	referencesInMD := imageReference.FindAllSubmatch(f, -1)
+	for _, i := range referencesInMD {
+		if len(i) < 2 {
+			continue
+		}
+
+		img := i[1]
+		clean := path.Clean(path.Join(d, string(img)))
+		fixedName := strings.TrimPrefix(clean, path.Clean(basePath))
+		fixedName = strings.TrimPrefix(fixedName, "/")
+		fixedName = strings.ReplaceAll(fixedName, "/", "_")
+		if strings.HasSuffix(fixedName, ".svg") {
+			fixedName = strings.TrimSuffix(fixedName, ".svg") + ".png"
+		}
+		fixedName = "../images/" + fixedName
+		fixedName = strings.ToLower(fixedName)
+		replaces[string(img)] = fixedName
+	}
+
+	imagesInMD := r.FindAll(f, -1)
+	extensions := []string{"jpg", "png", "svg"}
+	for _, i := range imagesInMD {
+		var fixedName string
+		var extIndex int
+		for _, e := range extensions {
+			extIndex = strings.Index(strings.ToLower(string(i)), "."+e)
+			if extIndex > 0 {
+				fixedName = string(i[0 : extIndex+1+3])
+				break
+			}
+		}
+
+		if extIndex == -1 {
+			continue
+		}
+
+		fixedName = strings.TrimPrefix(string(i), "(")
+		fixedName = strings.TrimSuffix(fixedName, ")")
+		clean := path.Clean(path.Join(d, fixedName))
+		fixedName = strings.TrimPrefix(clean, path.Clean(basePath))
+		fixedName = strings.TrimPrefix(fixedName, "/")
+		fixedName = strings.ReplaceAll(fixedName, "/", "_")
+
+		if strings.HasSuffix(fixedName, ".svg") {
+			fixedName = strings.TrimSuffix(fixedName, ".svg") + ".png"
+			//println("replacing svg " + string(i) + " with " + fixedName)
+		}
+
+		fixedName = "(../images/" + fixedName + ")"
+		fixedName = strings.ToLower(fixedName)
+
+		replaces[string(i)] = fixedName
+	}
+
+	for k, v := range replaces {
+		//fmt.Printf("replacing MD: %s -> %s\n", k, v)
+		f = bytes.ReplaceAll(f, []byte(k), []byte(v))
+	}
+
+	return f
+}
+
+func FixHTMLImages(f []byte, fullPath string, basePath string) []byte {
+	d := path.Dir(fullPath)
 	inHTML := imageInHTML.FindAllStringSubmatch(string(f), -1)
 
 	for _, ii := range inHTML {
@@ -101,39 +175,149 @@ func FixImages(f []byte, fullPath string, basePath string) []byte {
 				continue
 			}
 
-			clean := path.Clean(path.Join(d, i))
-			fixedName := clean[len(basePath)+1:]
+			var fixedName string
+			if strings.HasPrefix(i, "/azure/architecture") {
+				fixedName = strings.TrimPrefix(i, "/azure/architecture")
+			} else {
+				fixedName = path.Clean(path.Join(d, i))
+			}
+			fixedName = strings.TrimPrefix(fixedName, path.Clean(basePath))
+			fixedName = strings.TrimPrefix(fixedName, "/")
 			fixedName = strings.ReplaceAll(fixedName, "/", "_")
 			if strings.HasSuffix(fixedName, ".svg") {
 				fixedName = strings.TrimSuffix(fixedName, ".svg") + ".png"
+				//fmt.Printf("replacing svg: %s -> %s\n", i, fixedName)
 			}
 			fixedName = "../images/" + fixedName
 			fixedName = strings.ToLower(fixedName)
-			//println("replacing HTML " + i + " with " + fixedName)
 			f = bytes.ReplaceAll(f, []byte(i), []byte(fixedName))
+
+			//fmt.Printf("replacing html: %s -> %s\n", i, fixedName)
 		}
-	}
-
-	for _, i := range images {
-		fixedName := strings.TrimPrefix(string(i), "(")
-		fixedName = strings.TrimSuffix(fixedName, ")")
-		clean := path.Clean(path.Join(d, fixedName))
-		fixedName = clean[len(basePath)+1:]
-		fixedName = strings.ReplaceAll(fixedName, "/", "_")
-
-		fixedName = "(../images/" + fixedName + ")"
-		fixedName = strings.ToLower(fixedName)
-
-		//println("replacing MD" + string(i) + " with " + fixedName)
-		f = bytes.ReplaceAll(f, i, []byte(fixedName))
 	}
 
 	return f
 }
 
+func FixImages(f []byte, fullPath string, basePath string) []byte {
+
+	f = FixMDImages(f, fullPath, basePath)
+	f = FixHTMLImages(f, fullPath, basePath)
+
+	return f
+}
+
+func GetContents(filepath string) (data []byte, contentPath string, err error) {
+	ext := filepath[len(filepath)-3:]
+
+	switch ext {
+	case "yml":
+		data, contentPath, err = MDFromYML(filepath)
+		if err != nil {
+			return nil, "", err
+		}
+	case ".md":
+		if data, err = os.ReadFile(filepath); err != nil {
+			return nil, "", fmt.Errorf("cannot read MD: %w", err)
+		}
+		contentPath = filepath
+	default:
+		//println("unrecognized extension " + item.Href)
+	}
+
+	return data, contentPath, nil
+}
+
+// ImageFromTripleColon convert `:::image` to md image
+func ImageFromTripleColon(f []byte) []byte {
+	vv := tripleColon.FindAllStringSubmatch(string(f), -1)
+	for _, v := range vv {
+		src := ""
+		alt := ""
+		for n, i := range v {
+			if n == 0 {
+				alts := altText.FindStringSubmatch(i)
+				if len(alts) > 1 {
+					alt = alts[1]
+				}
+			} else {
+				src = i
+			}
+
+		}
+
+		if src != "" {
+			tag := fmt.Sprintf("![%s](%s)", alt, src)
+
+			f = bytes.Replace(f, []byte(v[0]), []byte(tag), -1)
+		}
+	}
+
+	return f
+}
+
+func RemoveYMLHeader(f []byte) []byte {
+	if bytes.HasPrefix(f, []byte("---")) {
+		parts := bytes.Split(f, []byte("---"))
+		if len(parts) > 1 {
+			f = []byte{}
+			for _, v := range parts[2:] {
+				f = append(f, v...)
+			}
+		}
+	}
+
+	return f
+}
+
+// AddPageTitle generate page title if it is not present
+func AddPageTitle(f []byte, name string) []byte {
+	if len(f) < len(name)*2 {
+		f = append([]byte("## "+name+"\n"), f...)
+	} else {
+		if !strings.Contains(strings.ToLower(string(f)[0:len(name)*2]), "# "+strings.ToLower(name)) {
+			f = append([]byte("## "+name+"\n"), f...)
+		}
+	}
+
+	return f
+}
+
+func Render(f []byte, renderer markdown.Renderer) string {
+	p := parser.NewWithExtensions(parser.CommonExtensions)
+	md := p.Parse(f)
+	text := string(markdown.Render(md, renderer))
+	return text
+}
+
+func SaveToEpub(e *epub.Epub, text string, contentPath string, parent string, basePath string, cssPath string, name string) (filename string) {
+	var fullPathSafe string
+	var err error
+
+	if len(contentPath) > 0 {
+		fullPathSafe = strings.ReplaceAll(contentPath[len(basePath):], "/", "_")
+	}
+
+	if parent == "" {
+		filename, err = e.AddSection(text, name, fullPathSafe, cssPath)
+	} else {
+		filename, err = e.AddSubSection(parent, text, name, fullPathSafe, cssPath)
+	}
+
+	if err != nil {
+		if !strings.HasPrefix(err.Error(), "Filename already used") {
+			slog.Error("unexpected epub error", "error", err.Error())
+			os.Exit(1)
+		}
+	}
+
+	return filename
+}
+
 func ItemToEpub(item TocItem, e *epub.Epub, parent string, cssPath string, basePath string, renderer markdown.Renderer) (filename string) {
 	var err error
 
+	// href is too small for "*.yml/md" or just empty
 	if len(item.Href) < 5 {
 		if parent == "" {
 			filename, err = e.AddSection(item.Name, item.Name, "", cssPath)
@@ -154,89 +338,20 @@ func ItemToEpub(item TocItem, e *epub.Epub, parent string, cssPath string, baseP
 		return filename
 	}
 
-	ext := item.Href[len(item.Href)-3:]
-
-	var f []byte
-	var fullPath string
-	switch ext {
-	case "yml":
-		f, fullPath, err = MDFromYML(path.Join(basePath, item.Href))
-		if err != nil {
-			log.Println(err.Error())
-		}
-	case ".md":
-		fullPath = path.Join(basePath, item.Href)
-		if f, err = os.ReadFile(fullPath); err != nil {
-			log.Println(fmt.Sprintf("cannot read MD: %s", err.Error()))
-			return ""
-		}
-	default:
-		//println("unrecognized extension " + item.Href)
-	}
-
-	// convert :::image to md image
-	vv := tripleColon.FindAllStringSubmatch(string(f), -1)
-	for _, v := range vv {
-		src := ""
-		alt := ""
-		for n, i := range v {
-			if n == 0 {
-				alt = altText.FindString(i)
-			} else {
-				src = i
-			}
-
-		}
-		if src != "" && alt != "" {
-			tag := fmt.Sprintf("![%s](%s)", alt, src)
-
-			f = bytes.Replace(f, []byte(v[0]), []byte(tag), -1)
-		}
-	}
-
-	if bytes.HasPrefix(f, []byte("---")) {
-		parts := bytes.Split(f, []byte("---"))
-		if len(parts) > 1 {
-			f = []byte{}
-			for _, v := range parts[2:] {
-				f = append(f, v...)
-			}
-		}
-	}
-
-	f = FixImages(f, fullPath, basePath)
-
-	// generate page title if it is not present
-	if len(f) < len(item.Name)*2 {
-		f = append([]byte("## "+item.Name+"\n"), f...)
-	} else {
-		if !strings.Contains(strings.ToLower(string(f)[0:len(item.Name)*2]), "# "+strings.ToLower(item.Name)) {
-			f = append([]byte("## "+item.Name+"\n"), f...)
-		}
-	}
-
-	p := parser.NewWithExtensions(parser.CommonExtensions)
-	md := p.Parse(f)
-	text := string(markdown.Render(md, renderer))
-
-	var fullPathSafe string
-	if len(fullPath) > 0 {
-		fullPathSafe = strings.ReplaceAll(fullPath[len(basePath):], "/", "_")
-	}
-
-	if parent == "" {
-		filename, err = e.AddSection(text, item.Name, fullPathSafe, cssPath)
-	} else {
-		filename, err = e.AddSubSection(parent, text, item.Name, fullPathSafe, cssPath)
-	}
-
+	f, contentPath, err := GetContents(path.Join(basePath, item.Href))
 	if err != nil {
-		if strings.HasPrefix(err.Error(), "Filename already used") {
-
-		} else {
-			panic(err)
-		}
+		slog.Error("cannot read contents of toc item", "error", err.Error())
+		return ""
 	}
+
+	f = ImageFromTripleColon(f)
+	f = RemoveYMLHeader(f)
+	f = FixImages(f, contentPath, basePath)
+	f = AddPageTitle(f, item.Name)
+
+	text := Render(f, renderer)
+
+	filename = SaveToEpub(e, text, contentPath, parent, basePath, cssPath, item.Name)
 
 	if len(item.Items) > 0 {
 		for _, i := range item.Items {
@@ -248,11 +363,10 @@ func ItemToEpub(item TocItem, e *epub.Epub, parent string, cssPath string, baseP
 }
 
 func (t *Toc) ToEPUB(e *epub.Epub, basePath string, renderer markdown.Renderer, csspath string) {
+	getPics(basePath, e)
 	for _, i := range t.Items {
 		ItemToEpub(i, e, "", csspath, basePath, renderer)
 	}
-
-	getPics(basePath, e)
 }
 
 // this code is poorly structured; I am not proud of it
